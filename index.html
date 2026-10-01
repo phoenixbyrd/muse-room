@@ -1084,7 +1084,8 @@ const presence = new Map();       // "pubkey:roomId" -> Date.now() of last heart
 /* ---------- last-seen roster ---------- */
 // Everyone observed in a room (heartbeat or chat message), kept long after the
 // 3-minute live window expires. "pubkey:roomId" -> Date.now() ms of last activity.
-// Persisted so the roster survives reloads; pruned to 30 days / 2000 entries.
+// Persisted so the roster survives reloads; capped at 2000 entries (most recent
+// kept) so storage stays bounded. Names never age out on their own.
 const seenAt = new Map();
 let seenAtSaveT = null;
 function touchSeen(pk, roomId){
@@ -1095,18 +1096,14 @@ function touchSeen(pk, roomId){
 }
 function saveSeenAt(){
   try{
-    const now = Date.now(), arr = [];
-    for(const [k, ts] of seenAt){
-      if(now - ts > 30*86400000){ seenAt.delete(k); continue; }
-      arr.push([k, ts]);
-    }
+    const arr = [...seenAt];
     arr.sort((a,b)=>b[1]-a[1]);
     localStorage.setItem("gr_seenat", JSON.stringify(arr.slice(0, 2000)));
   }catch(e){}
 }
 try{
-  const a = JSON.parse(localStorage.getItem("gr_seenat") || "[]"), now = Date.now();
-  for(const [k, ts] of a){ if(typeof k === "string" && typeof ts === "number" && now - ts < 30*86400000) seenAt.set(k, ts); }
+  const a = JSON.parse(localStorage.getItem("gr_seenat") || "[]");
+  for(const [k, ts] of a){ if(typeof k === "string" && typeof ts === "number") seenAt.set(k, ts); }
 }catch(e){}
 function refreshPresenceSub(rec){
   if(rec.ws.readyState !== 1 || rooms.length === 0) return;
