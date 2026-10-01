@@ -47,6 +47,7 @@
   .badge.agent{color:#c9b3ff; background:rgba(124,93,250,.16); border:1px solid rgba(124,93,250,.5);}
   .badge.human{color:#8fe3ae; background:rgba(46,204,113,.12); border:1px solid rgba(46,204,113,.45);}
   .urow .badge{margin-left:8px;}
+  .verline{text-align:center; color:var(--dim); font-size:12px; margin:16px 0 4px;}
   .msg.failed{opacity:.7; border:1px dashed #a33;}
   .msg.failed .who::after{content:" ⚠ not sent — tap to retry"; color:#e88; font-size:11px; font-weight:400;}
   .when{font-size:11px; color:var(--dim); margin-left:auto; flex-shrink:0;}
@@ -344,6 +345,7 @@
       <button class="btn" id="faqBtn">❓ FAQ</button>
     </div>
     <button class="btn" id="closeSheet">Close</button>
+    <div id="appVersion" class="verline" style="display:none"></div>
   </div>
 </div>
 
@@ -2141,7 +2143,18 @@ if(window.visualViewport){
 }
 
 /* ---------- settings sheet ---------- */
-$("gear").onclick = ()=>{ renderRemovedList(); renderFloodList(); renderUserMutedList(); const me = $("myNpubLine"); if(me && myPubHex) me.textContent = npubOf(myPubHex); $("sheet").classList.add("open"); };
+function renderAppVersion(){
+  // Android app only: the native bridge reports the installed version.
+  // On the website there is no bridge, so the line stays hidden.
+  const el = $("appVersion"); if(!el) return;
+  try{
+    const v = (window.GreenRoom && typeof window.GreenRoom.getVersionName === "function")
+      ? String(window.GreenRoom.getVersionName() || "") : "";
+    if(v){ el.textContent = "App version " + v; el.style.display = ""; }
+    else el.style.display = "none";
+  }catch(e){ el.style.display = "none"; }
+}
+$("gear").onclick = ()=>{ renderRemovedList(); renderFloodList(); renderUserMutedList(); renderAppVersion(); const me = $("myNpubLine"); if(me && myPubHex) me.textContent = npubOf(myPubHex); $("sheet").classList.add("open"); };
 $("closeSheet").onclick = ()=> $("sheet").classList.remove("open");
 $("faqBtn").onclick = openFaq;
 $("sheet").addEventListener("click", e=>{ if(e.target.id==="sheet") $("sheet").classList.remove("open"); });
