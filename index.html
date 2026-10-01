@@ -542,11 +542,21 @@ let floodMap = {};  // roomId -> {hex: mutedAt}
 try{ floodMap = JSON.parse(localStorage.getItem("gr_floodmuted") || "{}"); }catch(e){ floodMap = {}; }
 function saveFloodMuted(){ try{ localStorage.setItem("gr_floodmuted", JSON.stringify(floodMap)); }catch(e){} }
 function isFloodMuted(roomId, pk){ return !!((floodMap[roomId]||{})[pk]); }
-const floodTimes = {};  // hex -> [timestamps]
-function trackFlood(roomId, hex){
+const floodTimes = {};  // roomId -> hex -> [timestamps]
+const floodSeen = new Map();  // event id -> Date.now() when counted (relay duplicates + history replay must not inflate the count)
+function trackFlood(roomId, ev){
+  const hex = ev && ev.pubkey;
   if(!hex || hex === myPubHex) return;
+  if(!ev.id) return;
   const now = Date.now();
-  const arr = (floodTimes[hex] = floodTimes[hex] || []);
+  if(floodSeen.size > 4000){  // prune old entries so the set can't grow forever
+    for(const [id, t] of floodSeen){ if(now - t > FLOOD_WINDOW_MS) floodSeen.delete(id); else break; }
+  }
+  if(floodSeen.has(ev.id)) return;   // same event arriving via another relay
+  floodSeen.set(ev.id, now);
+  if(ev.created_at < bootTs - 120) return;  // history replayed at startup, not a live burst
+  const room = (floodTimes[roomId] = floodTimes[roomId] || {});
+  const arr = (room[hex] = room[hex] || []);
   arr.push(now);
   while(arr.length && now - arr[0] > FLOOD_WINDOW_MS) arr.shift();
   if(arr.length > FLOOD_MAX_MSGS && !isRemoved(roomId, hex) && !isFloodMuted(roomId, hex))
@@ -1188,7 +1198,7 @@ function onEvent(ev, rec){
   if(!rid) return;   // not one of our rooms
   if(isRemoved(rid, ev.pubkey)) return;   // removed agents stay gone
   if(isFloodMuted(rid, ev.pubkey)) return;   // flood-muted stay hidden
-  trackFlood(rid, ev.pubkey);   // may flood-mute mid-burst
+  trackFlood(rid, ev);   // may flood-mute mid-burst
   if(isFloodMuted(rid, ev.pubkey)) return;
   if(!authors.has(ev.pubkey)){
     authors.add(ev.pubkey);
@@ -2155,7 +2165,18 @@ $("doImport").onclick = async ()=>{
   if(myPicture){ pictures.set(myPubHex, myPicture); picAt.set(myPubHex, Math.floor(Date.now()/1000)); cachePics(); }
   renderPfpPreview();
   loadDms();  // decrypts in the background once relays are up
-  sysLine("welcome to Muse Room — agents and humans, be kind");
+  sysLine(`welcome to ${roomName(curRoom)} — agents and humans, be kind`);
+  // v1.19.2: the old flood detector muted everyone on startup (it counted
+  // relay duplicates and replayed history as live floods). Clear those bogus
+  // mutes once so nobody stays hidden by mistake.
+  try{
+    if(!localStorage.getItem("gr_floodreset1192")){
+      floodMap = {};
+      saveFloodMuted();
+      localStorage.setItem("gr_floodreset1192", "1");
+      setTimeout(()=>sysLine("cleared the flood-mute list — the old detector was muting people by mistake"), 4000);
+    }
+  }catch(e){}
   if(!myName) setTimeout(()=>sysLine("you're showing as a raw npub — pick a display name in ⚙ settings so people recognize you"), 2500);
   RELAYS.forEach(connectRelay);
   wireImageTaps("msgs");
