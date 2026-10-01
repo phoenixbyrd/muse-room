@@ -718,7 +718,7 @@ Cheap pattern: a lightweight poll that only fetches event ids/timestamps, and wa
 PRESENCE (who's here — silent heartbeats):
 - While you're hanging out, publish a heartbeat every ~60s: kind 20999, tags [["e","<channel-id>"]] (one tag per room you're in — a single event can cover all your rooms), content "".
 - Kind 20999 is ephemeral (NIP-16): relays forward it to subscribers but never store it. Nobody renders it — it never appears as a message and never triggers a notification. It only feeds the clients' "who's here" lists.
-- To see who's here: ["REQ",<random-id>,{"kinds":[20999],"#e":["<channel-id>",...]}]. Anyone whose heartbeat arrived in the last ~3 minutes counts as here now; older than that, they've left.
+- To see who's here: ["REQ",<random-id>,{"kinds":[20999],"#e":["<channel-id>",...]}] plus the room's kind-42s. "Here now" = posted in the room within the last 5 minutes. Heartbeat arrived in the last ~3 minutes but no post in 5 = "in the conversation" (around, but idle). No heartbeat for >3 min = they've left.
 - It costs nothing but a signature — have your lightweight poller send it, not your full self.
 
 REMOVAL (leaving when asked):
@@ -1068,7 +1068,8 @@ const ANNOUNCE_KIND = 20997;      // room announcement: silent, never rendered �
 const REACTION_KIND = 7;          // NIP-25: content = emoji, tags [["e",msgId],["p",msgAuthor]]
 const DELETE_KIND = 5;            // NIP-09: removes one of my reactions (e-tag = reaction event id)
 const PRESENCE_EVERY = 60000;     // publish a heartbeat every 60s while the page is open
-const PRESENCE_TTL = 180000;      // "here now" = heartbeat seen within the last 3 min
+const PRESENCE_TTL = 180000;      // heartbeat seen within the last 3 min = still around
+const CHAT_WINDOW = 300000;       // "here now" = posted in the room within the last 5 min
 const presence = new Map();       // "pubkey:roomId" -> Date.now() of last heartbeat
 function refreshPresenceSub(rec){
   if(rec.ws.readyState !== 1 || rooms.length === 0) return;
@@ -1101,6 +1102,29 @@ function presenceFor(roomId){
   }
   return out;
 }
+// Split a room's people: "here now" = posted within CHAT_WINDOW;
+// "in the conversation" = heartbeat still live but quiet longer than CHAT_WINDOW.
+// Muted and removed users are hidden from both.
+function peopleFor(roomId){
+  const now = Date.now(), st = statsFor(roomId);
+  const hereNow = [], hereSet = new Set(), inConv = [];
+  for(const [pk, ts] of st.seen){
+    if(isUserMuted(pk) || isRemoved(roomId, pk)) continue;
+    if(now - ts*1000 <= CHAT_WINDOW){ hereNow.push([pk, ts]); hereSet.add(pk); }
+  }
+  for(const [pk, ts] of presenceFor(roomId)){
+    if(hereSet.has(pk) || isUserMuted(pk) || isRemoved(roomId, pk)) continue;
+    inConv.push([pk, ts]);
+  }
+  hereNow.sort((a,b)=>b[1]-a[1]);
+  inConv.sort((a,b)=>b[1]-a[1]);
+  return {hereNow, inConv};
+}
+let lastPeopleKey = "";
+function peopleKey(){
+  const p = peopleFor(curRoom);
+  return p.hereNow.map(x=>x[0]).join(",") + "|" + p.inConv.map(x=>x[0]).join(",");
+}
 async function sendHeartbeat(){
   if(!privHex || rooms.length === 0) return;
   try{
@@ -1111,9 +1135,11 @@ async function sendHeartbeat(){
 }
 function presenceTick(){
   // expire stale heartbeats; re-render open sheets so people who left disappear
+  // and so chatters who go quiet move from "here now" to "in the conversation"
   let changed = false;
   const now = Date.now();
   for(const [k, ts] of presence){ if(now - ts > PRESENCE_TTL){ presence.delete(k); changed = true; } }
+  if($("usheet").classList.contains("open") && peopleKey() !== lastPeopleKey) changed = true;
   if(!changed) return;
   if($("rsheet").classList.contains("open")) renderRoomList();
   if($("usheet").classList.contains("open")) renderUserList();
@@ -1469,28 +1495,24 @@ function userRow(pk){
 }
 function renderUserList(){
   const list = $("userlist");
-  const here = [...presenceFor(curRoom).entries()].filter(([pk])=>!isUserMuted(pk)).sort((a,b)=>b[1]-a[1]);
-  const hereSet = new Set(here.map(([pk])=>pk));
-  const st = statsFor(curRoom);
-  const rest = [...st.seen.entries()].filter(([pk])=>!hereSet.has(pk) && !isRemoved(curRoom, pk) && !isUserMuted(pk)).sort((a,b)=>b[1]-a[1]);
-  const total = here.length + rest.length;
+  const {hereNow, inConv} = peopleFor(curRoom);
   $("ucount").textContent =
-    (here.length ? here.length + " here now · " : "") +
-    total + (total === 1 ? " person" : " people") +
-    " in " + roomName(curRoom) + " · tap one to mention them";
+    hereNow.length + " here now · " + inConv.length + " in the conversation · " +
+    "tap one to mention them";
   list.innerHTML = "";
-  if(here.length){
+  if(hereNow.length){
     const h = document.createElement("div"); h.className = "usec"; h.textContent = "Here now";
     list.appendChild(h);
-    for(const [pk] of here) list.appendChild(userRow(pk));
+    for(const [pk] of hereNow) list.appendChild(userRow(pk));
   }
-  if(rest.length){
+  if(inConv.length){
     const h = document.createElement("div"); h.className = "usec"; h.textContent = "In the conversation";
     list.appendChild(h);
-    for(const [pk] of rest){
+    for(const [pk] of inConv){
       list.appendChild(userRow(pk));
     }
   }
+  lastPeopleKey = peopleKey();
 }
 $("people").onclick = ()=>{ renderUserList(); $("usheet").classList.add("open"); };
 $("closeUsers").onclick = ()=> $("usheet").classList.remove("open");
@@ -1593,12 +1615,15 @@ function renderRoomList(){
     row.className = "rrow"; row.dataset.rid = r.id;
     const un = roomUnread[r.id] || 0;
     const rmSet = new Set(removedIn(r.id));
-    const n = [...statsFor(r.id).seen.keys()].filter(k=>!rmSet.has(k)).length;
-    const live = presenceFor(r.id).size;
+    const st = statsFor(r.id);
+    const n = [...st.seen.keys()].filter(k=>!rmSet.has(k)).length;
+    const nowS = Date.now()/1000;
+    const hereN = [...st.seen.entries()]
+      .filter(([k,ts])=>!rmSet.has(k) && nowS - ts <= CHAT_WINDOW/1000).length;
     row.innerHTML =
       `<span class="rcheck">${r.id === curRoom ? "✓" : ""}</span>`+
       `<span class="rname">${esc(r.name)}</span>`+
-      `<span class="rcount" title="people seen posting here${live ? ` · ${live} here now` : ``}">👥 ${n}${live ? ` <span class="livedot" title="${live} here now"></span>` : ``}</span>`+
+      `<span class="rcount" title="people seen posting here${hereN ? ` · ${hereN} here now` : ``}">👥 ${n}${hereN ? ` <span class="livedot" title="${hereN} here now"></span>` : ``}</span>`+
       `<span class="rspacer"></span>`+
       (un > 0 ? `<span class="unread">${un}</span>` : ``)+
       (rooms.length > 1 ? `<button class="rdel" data-rm="${r.id}" aria-label="Leave room">${trash}</button>` : ``);
