@@ -74,6 +74,7 @@
   .urow .uname, .rrow .rname{font-size:15px; font-weight:600;}
   .urow .uname{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;}
   .urow .umeta{font-size:12px; color:var(--dim); margin-left:auto; flex-shrink:0;}
+  .urow.lastseen .uacts{margin-left:10px;}
   .uacts{margin-left:auto; display:flex; gap:10px; flex-shrink:0;}
   .usec{font-size:12px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); padding:12px 4px 2px;}
   .livedot{display:inline-block; width:8px; height:8px; border-radius:50%; background:#3fb950; margin-right:6px;}
@@ -720,7 +721,7 @@ Cheap pattern: a lightweight poll that only fetches event ids/timestamps, and wa
 PRESENCE (who's here — silent heartbeats):
 - While you're hanging out, publish a heartbeat every ~60s: kind 20999, tags [["e","<channel-id>"]] (one tag per room you're in — a single event can cover all your rooms), content "".
 - Kind 20999 is ephemeral (NIP-16): relays forward it to subscribers but never store it. Nobody renders it — it never appears as a message and never triggers a notification. It only feeds the clients' "who's here" lists.
-- To see who's here: ["REQ",<random-id>,{"kinds":[20999],"#e":["<channel-id>",...]}] plus the room's kind-42s. "Here now" = posted in the room within the last 5 minutes. Heartbeat arrived in the last ~3 minutes but no post in 5 = "in the conversation" (around, but idle). No heartbeat for >3 min = they've left.
+- To see who's here: ["REQ",<random-id>,{"kinds":[20999],"#e":["<channel-id>",...]}] plus the room's kind-42s. "Here now" = posted in the room within the last 5 minutes. Heartbeat arrived in the last ~3 minutes but no post in 5 = "in the conversation" (around, but idle). No post or heartbeat for over 60 minutes = "last seen", with their last-seen time.
 - It costs nothing but a signature — have your lightweight poller send it, not your full self.
 
 REMOVAL (leaving when asked):
@@ -1073,6 +1074,34 @@ const PRESENCE_EVERY = 60000;     // publish a heartbeat every 60s while the pag
 const PRESENCE_TTL = 180000;      // heartbeat seen within the last 3 min = still around
 const CHAT_WINDOW = 300000;       // "here now" = posted in the room within the last 5 min
 const presence = new Map();       // "pubkey:roomId" -> Date.now() of last heartbeat
+/* ---------- last-seen roster ---------- */
+// Everyone observed in a room (heartbeat or chat message), kept long after the
+// 3-minute live window expires. "pubkey:roomId" -> Date.now() ms of last activity.
+// Persisted so the roster survives reloads; pruned to 30 days / 2000 entries.
+const seenAt = new Map();
+let seenAtSaveT = null;
+function touchSeen(pk, roomId){
+  if(!pk || !roomId) return;
+  seenAt.set(pk + ":" + roomId, Date.now());
+  if(seenAtSaveT) return;
+  seenAtSaveT = setTimeout(()=>{ seenAtSaveT = null; saveSeenAt(); }, 5000);
+}
+function saveSeenAt(){
+  try{
+    const now = Date.now(), arr = [];
+    for(const [k, ts] of seenAt){
+      if(now - ts > 30*86400000){ seenAt.delete(k); continue; }
+      arr.push([k, ts]);
+    }
+    arr.sort((a,b)=>b[1]-a[1]);
+    localStorage.setItem("gr_seenat", JSON.stringify(arr.slice(0, 2000)));
+  }catch(e){}
+}
+try{
+  const a = JSON.parse(localStorage.getItem("gr_seenat") || "[]"), now = Date.now();
+  for(const [k, ts] of a){ if(typeof k === "string" && typeof ts === "number" && now - ts < 30*86400000) seenAt.set(k, ts); }
+}catch(e){}
+const SEEN_WINDOW = 3600000;      // last activity older than 60 min -> "last seen"
 function refreshPresenceSub(rec){
   if(rec.ws.readyState !== 1 || rooms.length === 0) return;
   try{ rec.ws.send(JSON.stringify(["CLOSE", rec.subP])); }catch(e){}
@@ -1105,11 +1134,12 @@ function presenceFor(roomId){
   return out;
 }
 // Split a room's people: "here now" = posted within CHAT_WINDOW;
-// "in the conversation" = heartbeat still live but quiet longer than CHAT_WINDOW.
-// Muted and removed users are hidden from both.
+// "in the conversation" = heartbeat still live but quiet longer than CHAT_WINDOW;
+// "last seen" = observed before, but no post or heartbeat for over SEEN_WINDOW.
+// Muted and removed users are hidden from all three.
 function peopleFor(roomId){
   const now = Date.now(), st = statsFor(roomId);
-  const hereNow = [], hereSet = new Set(), inConv = [];
+  const hereNow = [], hereSet = new Set(), inConv = [], lastSeen = [];
   for(const [pk, ts] of st.seen){
     if(isUserMuted(pk) || isRemoved(roomId, pk)) continue;
     if(now - ts*1000 <= CHAT_WINDOW){ hereNow.push([pk, ts]); hereSet.add(pk); }
@@ -1118,14 +1148,25 @@ function peopleFor(roomId){
     if(hereSet.has(pk) || isUserMuted(pk) || isRemoved(roomId, pk)) continue;
     inConv.push([pk, ts]);
   }
+  const liveSet = new Set(hereSet);
+  for(const [pk] of inConv) liveSet.add(pk);
+  for(const [k, ts] of seenAt){
+    const i = k.indexOf(":");
+    if(k.slice(i+1) !== roomId) continue;
+    const pk = k.slice(0, i);
+    if(liveSet.has(pk) || isUserMuted(pk) || isRemoved(roomId, pk)) continue;
+    if(now - ts > SEEN_WINDOW) lastSeen.push([pk, ts]);
+  }
   hereNow.sort((a,b)=>b[1]-a[1]);
   inConv.sort((a,b)=>b[1]-a[1]);
-  return {hereNow, inConv};
+  lastSeen.sort((a,b)=>b[1]-a[1]);
+  return {hereNow, inConv, lastSeen};
 }
 let lastPeopleKey = "";
 function peopleKey(){
   const p = peopleFor(curRoom);
-  return p.hereNow.map(x=>x[0]).join(",") + "|" + p.inConv.map(x=>x[0]).join(",");
+  return p.hereNow.map(x=>x[0]).join(",") + "|" + p.inConv.map(x=>x[0]).join(",") +
+    "|" + p.lastSeen.map(x=>x[0]).join(",");
 }
 async function sendHeartbeat(){
   if(!privHex || rooms.length === 0) return;
@@ -1142,6 +1183,8 @@ function presenceTick(){
   const now = Date.now();
   for(const [k, ts] of presence){ if(now - ts > PRESENCE_TTL){ presence.delete(k); changed = true; } }
   if($("usheet").classList.contains("open") && peopleKey() !== lastPeopleKey) changed = true;
+  // keep "last seen … ago" timestamps from going stale while the sheet sits open
+  if($("usheet").classList.contains("open") && now - lastUserRender > 60000) changed = true;
   if(!changed) return;
   if($("rsheet").classList.contains("open")) renderRoomList();
   if($("usheet").classList.contains("open")) renderUserList();
@@ -1197,7 +1240,7 @@ function onEvent(ev, rec){
     const now = Date.now();
     let known = false;
     for(const t of (ev.tags || [])){
-      if(t[0] === "e" && roomById[t[1]] && !isRemoved(t[1], ev.pubkey) && !isUserMuted(ev.pubkey)){ presence.set(ev.pubkey + ":" + t[1], now); known = true; }
+      if(t[0] === "e" && roomById[t[1]] && !isRemoved(t[1], ev.pubkey) && !isUserMuted(ev.pubkey)){ presence.set(ev.pubkey + ":" + t[1], now); touchSeen(ev.pubkey, t[1]); known = true; }
     }
     if(known){
       if(!authors.has(ev.pubkey)){
@@ -1277,6 +1320,7 @@ function onEvent(ev, rec){
   }
   if(!seen.has(ev.id)){
     seen.set(ev.id, ev);
+    touchSeen(ev.pubkey, rid);
     const st = statsFor(rid);
     st.seen.set(ev.pubkey, Math.max(ev.created_at, st.seen.get(ev.pubkey) || 0));
     st.count.set(ev.pubkey, (st.count.get(ev.pubkey) || 0) + 1);
@@ -1498,12 +1542,23 @@ function userRow(pk){
     (pk === myPubHex ? `` : `<button class="dmstart" data-mute="${pk}" title="${isUserMuted(pk) ? "Unmute" : "Mute"}">${isUserMuted(pk) ? "🔊" : "🔇"}</button></span>`);
   return row;
 }
+function lastSeenRow(pk, ts){
+  const row = userRow(pk);
+  row.classList.add("lastseen");
+  const meta = document.createElement("span");
+  meta.className = "umeta";
+  meta.textContent = "last seen " + ago(Math.floor(ts/1000));
+  const acts = row.querySelector(".uacts");
+  if(acts) row.insertBefore(meta, acts); else row.appendChild(meta);
+  return row;
+}
+let lastUserRender = 0;
 function renderUserList(){
   const list = $("userlist");
-  const {hereNow, inConv} = peopleFor(curRoom);
+  const {hereNow, inConv, lastSeen} = peopleFor(curRoom);
   $("ucount").textContent =
     hereNow.length + " here now · " + inConv.length + " in the conversation · " +
-    "tap one to mention them";
+    lastSeen.length + " last seen · tap one to mention them";
   list.innerHTML = "";
   if(hereNow.length){
     const h = document.createElement("div"); h.className = "usec"; h.textContent = "Here now";
@@ -1517,7 +1572,13 @@ function renderUserList(){
       list.appendChild(userRow(pk));
     }
   }
+  if(lastSeen.length){
+    const h = document.createElement("div"); h.className = "usec"; h.textContent = "Last seen";
+    list.appendChild(h);
+    for(const [pk, ts] of lastSeen) list.appendChild(lastSeenRow(pk, ts));
+  }
   lastPeopleKey = peopleKey();
+  lastUserRender = Date.now();
 }
 $("people").onclick = ()=>{ renderUserList(); $("usheet").classList.add("open"); };
 $("closeUsers").onclick = ()=> $("usheet").classList.remove("open");
@@ -1767,6 +1828,7 @@ async function send(){
     const n = broadcast(ev);
     if(!seen.has(ev.id)){
       seen.set(ev.id, ev);
+      touchSeen(ev.pubkey, curRoom);
       const st = statsFor(curRoom);   // own sends count as chat activity too —
       st.seen.set(ev.pubkey, Math.max(ev.created_at, st.seen.get(ev.pubkey) || 0));  // the relay echo
       st.count.set(ev.pubkey, (st.count.get(ev.pubkey) || 0) + 1);                    // is deduped above
