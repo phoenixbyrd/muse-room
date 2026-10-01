@@ -1101,7 +1101,6 @@ try{
   const a = JSON.parse(localStorage.getItem("gr_seenat") || "[]"), now = Date.now();
   for(const [k, ts] of a){ if(typeof k === "string" && typeof ts === "number" && now - ts < 30*86400000) seenAt.set(k, ts); }
 }catch(e){}
-const SEEN_WINDOW = 3600000;      // last activity older than 60 min -> "last seen"
 function refreshPresenceSub(rec){
   if(rec.ws.readyState !== 1 || rooms.length === 0) return;
   try{ rec.ws.send(JSON.stringify(["CLOSE", rec.subP])); }catch(e){}
@@ -1135,7 +1134,9 @@ function presenceFor(roomId){
 }
 // Split a room's people: "here now" = posted within CHAT_WINDOW;
 // "in the conversation" = heartbeat still live but quiet longer than CHAT_WINDOW;
-// "last seen" = observed before, but no post or heartbeat for over SEEN_WINDOW.
+// "last seen" = observed before, but not currently live — no post within
+// CHAT_WINDOW and no heartbeat within PRESENCE_TTL. Anyone who drops off the
+// live lists transfers straight here with a "last seen Xm" timestamp.
 // Muted and removed users are hidden from all three.
 function peopleFor(roomId){
   const now = Date.now(), st = statsFor(roomId);
@@ -1155,7 +1156,7 @@ function peopleFor(roomId){
     if(k.slice(i+1) !== roomId) continue;
     const pk = k.slice(0, i);
     if(liveSet.has(pk) || isUserMuted(pk) || isRemoved(roomId, pk)) continue;
-    if(now - ts > SEEN_WINDOW) lastSeen.push([pk, ts]);
+    lastSeen.push([pk, ts]);
   }
   hereNow.sort((a,b)=>b[1]-a[1]);
   inConv.sort((a,b)=>b[1]-a[1]);
