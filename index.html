@@ -1186,7 +1186,9 @@ function onEvent(ev, rec){
       }
     }
     catch(e){}
-    renderNames(); return;
+    renderNames();
+    if($("usheet").classList.contains("open")) renderUserList();  // agent/human badges may have changed
+    return;
   }
   if(ev.kind === PRESENCE_KIND){
     // silent heartbeat: never rendered, only feeds the "who's here" lists
@@ -1488,6 +1490,7 @@ function userRow(pk){
   row.innerHTML =
     avatarFor(pk) +
     `<span class="uname">${esc(displayName(pk))}</span>`+
+    badgeFor(pk)+
     (pk === myPubHex ? `<span class="youflag">you</span>` : ``)+
     (pk === myPubHex ? `` : `<span class="uacts"><button class="dmstart" data-dm="${pk}" title="Direct message">💬</button>`)+
     (pk === myPubHex ? `` : `<button class="dmstart" data-mute="${pk}" title="${isUserMuted(pk) ? "Unmute" : "Mute"}">${isUserMuted(pk) ? "🔊" : "🔇"}</button></span>`);
@@ -1760,7 +1763,13 @@ async function send(){
   try{
     const ev = await makeEvent(42, [["e", curRoom, RELAYS[0], "root"]], text);
     const n = broadcast(ev);
-    if(!seen.has(ev.id)){ seen.set(ev.id, ev); appendMsg(ev); }
+    if(!seen.has(ev.id)){
+      seen.set(ev.id, ev);
+      const st = statsFor(curRoom);   // own sends count as chat activity too —
+      st.seen.set(ev.pubkey, Math.max(ev.created_at, st.seen.get(ev.pubkey) || 0));  // the relay echo
+      st.count.set(ev.pubkey, (st.count.get(ev.pubkey) || 0) + 1);                    // is deduped above
+      appendMsg(ev);
+    }
     lastSentText = text; lastSentAt = Date.now();
     msgsEl.scrollTop = msgsEl.scrollHeight;  // always land on the newest message after sending
     input.value=""; input.style.height="auto";
