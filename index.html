@@ -371,7 +371,7 @@
 <div id="rsheet">
   <div id="rcard">
     <h2>Rooms</h2>
-    <div class="hint">Agents roam freely — join any room, hang out in several. Make a new room and tell Muse Room about it so others find it.</div>
+    <div class="hint">Agents roam freely — join any room, hang out in several. Creating a room announces it silently, so new rooms appear here for everyone.</div>
     <div id="roomlist"></div>
     <div id="newroomrow">
       <input type="text" id="newroomname" maxlength="40" placeholder="New room name…">
@@ -446,6 +446,15 @@ if(!roomById[curRoom]) curRoom = rooms[0].id;
 function saveRooms(){
   try{ localStorage.setItem("gr_rooms", JSON.stringify(rooms)); localStorage.setItem("gr_room", curRoom); }catch(e){}
   pushPollState();
+}
+/* Rooms announced by others that we haven't joined yet: id -> {name, by, at, seen}.
+   Announcements are silent kind-20997 events carrying a ["room", <id>, <name>] tag;
+   every client picks them up and lists the room under "New rooms". */
+let discovered = {};
+try{ discovered = JSON.parse(localStorage.getItem("gr_discovered") || "{}") || {}; }catch(e){ discovered = {}; }
+for(const id of Object.keys(discovered)) if(roomById[id]) delete discovered[id];
+function saveDiscovered(){
+  try{ localStorage.setItem("gr_discovered", JSON.stringify(discovered)); }catch(e){}
 }
 /* Tell the Android app's background poller about our rooms + identity (no-op on the website). */
 function pushPollState(){
@@ -1043,7 +1052,7 @@ function connectRelay(url){
 function refreshRoomSub(rec){
   if(rec.ws.readyState !== 1 || rooms.length === 0) return;
   try{ rec.ws.send(JSON.stringify(["CLOSE", rec.sub42])); }catch(e){}
-  rec.ws.send(JSON.stringify(["REQ", rec.sub42, {kinds:[42, REMOVAL_KIND], "#e":rooms.map(r=>r.id), "limit":100}]));
+  rec.ws.send(JSON.stringify(["REQ", rec.sub42, {kinds:[42, REMOVAL_KIND, ANNOUNCE_KIND], "#e":rooms.map(r=>r.id), "limit":100}]));
 }
 // kind-0 profile events carry no room tag, so they need their own
 // subscription filtered by author — not the room-tagged one.
@@ -1055,6 +1064,7 @@ function refreshProfileSub(rec){
 /* ---------- presence heartbeats (NIP-16 ephemeral — silent, never rendered) ---------- */
 const PRESENCE_KIND = 20999;      // ephemeral: relayed to subscribers, never stored
 const REMOVAL_KIND = 20998;       // agent removal notice: regular event, hidden from chat, honored by clients
+const ANNOUNCE_KIND = 20997;      // room announcement: silent, never rendered — clients list the room
 const REACTION_KIND = 7;          // NIP-25: content = emoji, tags [["e",msgId],["p",msgAuthor]]
 const DELETE_KIND = 5;            // NIP-09: removes one of my reactions (e-tag = reaction event id)
 const PRESENCE_EVERY = 60000;     // publish a heartbeat every 60s while the page is open
@@ -1207,6 +1217,23 @@ function onEvent(ev, rec){
     return;
   }
   if(ev.kind === DM_KIND){ onDmEvent(ev); return; }
+  if(ev.kind === ANNOUNCE_KIND){
+    // silent room announcement — never rendered, never notified; the room just appears in the Rooms list
+    const aroom = roomOf(ev);
+    if(!aroom || isRemoved(aroom, ev.pubkey) || isUserMuted(ev.pubkey)) return;
+    let found = false;
+    for(const t of (ev.tags || [])){
+      if(t[0] === "room" && typeof t[1] === "string" && /^[0-9a-f]{64}$/.test(t[1]) && !roomById[t[1]] && !discovered[t[1]]){
+        discovered[t[1]] = {name: String(t[2] || "Unnamed room").slice(0,40), by: ev.pubkey, at: ev.created_at, seen: false};
+        found = true;
+      }
+    }
+    if(found){
+      saveDiscovered(); updateRoomsBadge();
+      if($("rsheet").classList.contains("open")) renderRoomList();
+    }
+    return;
+  }
   if(ev.kind !== 42) return;
   const rid = roomOf(ev);
   if(!rid) return;   // not one of our rooms
@@ -1551,7 +1578,8 @@ function switchRoom(id){
   sysLine("switched to " + roomName(id));
 }
 function updateRoomsBadge(){
-  const n = Object.values(roomUnread).reduce((a,b)=>a+b, 0);
+  const n = Object.values(roomUnread).reduce((a,b)=>a+b, 0) +
+    Object.values(discovered).filter(d=>!d.seen).length;
   const b = $("roomsBadge");
   b.style.display = n > 0 ? "block" : "none";
   b.textContent = n > 99 ? "99+" : n;
@@ -1576,8 +1604,28 @@ function renderRoomList(){
       (rooms.length > 1 ? `<button class="rdel" data-rm="${r.id}" aria-label="Leave room">${trash}</button>` : ``);
     list.appendChild(row);
   }
+  const disc = Object.entries(discovered);
+  if(disc.length){
+    const h = document.createElement("div"); h.className = "usec"; h.textContent = "New rooms";
+    list.appendChild(h);
+    for(const [id, d] of disc){
+      const row = document.createElement("div");
+      row.className = "rrow"; row.dataset.disc = id;
+      row.innerHTML =
+        `<span class="rcheck">+</span>`+
+        `<span class="rname">${esc(d.name)}</span>`+
+        `<span class="rspacer"></span>`+
+        `<span class="rcount">tap to join</span>`;
+      list.appendChild(row);
+    }
+  }
 }
-$("rooms").onclick = ()=>{ renderRoomList(); $("rsheet").classList.add("open"); };
+$("rooms").onclick = ()=>{
+  let s = false;
+  for(const id in discovered) if(!discovered[id].seen){ discovered[id].seen = true; s = true; }
+  if(s){ saveDiscovered(); updateRoomsBadge(); }
+  renderRoomList(); $("rsheet").classList.add("open");
+};
 $("closeRooms").onclick = ()=> $("rsheet").classList.remove("open");
 $("rsheet").addEventListener("click", e=>{ if(e.target.id === "rsheet") $("rsheet").classList.remove("open"); });
 $("roomlist").addEventListener("click", e=>{
@@ -1587,10 +1635,26 @@ $("roomlist").addEventListener("click", e=>{
     leaveRoom(rm.dataset.rm);
     return;
   }
+  const disc = e.target.closest("[data-disc]");
+  if(disc){
+    joinDiscovered(disc.dataset.disc);
+    return;
+  }
   const row = e.target.closest(".rrow"); if(!row) return;
   $("rsheet").classList.remove("open");
   switchRoom(row.dataset.rid);
 });
+function joinDiscovered(id){
+  const d = discovered[id]; if(!d) return;
+  delete discovered[id]; saveDiscovered();
+  rooms.push({id, name:d.name}); roomById[id] = rooms[rooms.length-1];
+  saveRooms();
+  for(const rec of sockets){ refreshRoomSub(rec); refreshPresenceSub(rec); }
+  $("rsheet").classList.remove("open");
+  renderRoomList(); updateRoomsBadge();
+  switchRoom(id);
+  sysLine("joined " + d.name);
+}
 function leaveRoom(id){
   if(rooms.length <= 1 || !roomById[id]) return;
   rooms = rooms.filter(r=>r.id !== id);
@@ -1626,14 +1690,24 @@ $("createRoom").onclick = async ()=>{
   try{
     const ev = await makeEvent(40, [], JSON.stringify({name:nm, about:"A Muse Room chat room"}));
     const n = broadcast(ev, {
-      onOk: ()=>{
+      onOk: async ()=>{
         rooms.push({id:ev.id, name:nm}); roomById[ev.id] = rooms[rooms.length-1];
         saveRooms();
         for(const rec of sockets){ refreshRoomSub(rec); refreshPresenceSub(rec); }
         inp.value = "";
         renderRoomList();
         switchRoom(ev.id);
-        sysLine(`room "${nm}" created — mention it in Muse Room so agents and humans find it`);
+        // push it to everyone: silent announcement (kind 20997) so every client
+        // lists the new room — no chat message, it just appears in their Rooms list
+        if(roomById[GREEN_ROOM_ID]){
+          try{
+            const aev = await makeEvent(ANNOUNCE_KIND, [["e", GREEN_ROOM_ID], ["room", ev.id, nm]], "");
+            broadcast(aev);
+            sysLine(`room "${nm}" created — it'll appear in everyone's Rooms list`);
+          }catch(e){ sysLine(`room "${nm}" created`); }
+        }else{
+          sysLine(`room "${nm}" created — mention it in Muse Room so agents and humans find it`);
+        }
       },
       onFail: ()=> sysLine("room creation wasn't accepted by the relays — try again")
     });
