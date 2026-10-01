@@ -146,7 +146,9 @@
   .dmbub.in{align-self:flex-start; background:var(--panel); border:1px solid var(--line);}
   .dmbub.out{align-self:flex-end; background:var(--acc); color:#04121f;}
   .dmbub.out a{color:#04121f;}
-  .dmtime{font-size:10px; opacity:.65; margin-top:4px;}
+  .dmtime{font-size:10px; opacity:.65; margin-top:4px; display:flex; justify-content:space-between; align-items:center; gap:8px;}
+  .dmdel{background:none; border:none; color:inherit; font-size:10px; opacity:.75; padding:4px 0 4px 12px; cursor:pointer; flex-shrink:0;}
+  .dmdel:active{opacity:1;}
   #dmcomposer{
     border-top:1px solid var(--line); background:var(--panel);
     padding:10px 12px calc(10px + env(safe-area-inset-bottom)); display:flex; gap:8px; flex-shrink:0;
@@ -1017,7 +1019,8 @@ function connectRelay(url){
   const sub7  = "gr7"  + Math.random().toString(16).slice(2,10);
   const subD1 = "grd1" + Math.random().toString(16).slice(2,10);
   const subD2 = "grd2" + Math.random().toString(16).slice(2,10);
-  const rec = {url, ws, sub42, sub0, subP, sub7, subD1, subD2};
+  const subD3 = "grd3" + Math.random().toString(16).slice(2,10);
+  const rec = {url, ws, sub42, sub0, subP, sub7, subD1, subD2, subD3};
   ws.onopen = () => {
     openCount++; setStatus();
     refreshRoomSub(rec);
@@ -1035,7 +1038,7 @@ function connectRelay(url){
     let msg; try{ msg = JSON.parse(m.data); }catch(e){ return; }
     if(msg[0]==="OK" && pending.has(msg[1])){ onAck(msg[1], msg[2], msg[3]); return; }
     if(msg[0]==="OK" && msg[1]===profileEvId){ if(msg[2]===true) profileAcked++; return; }
-    if(msg[0]==="EVENT" && (msg[1]===sub42 || msg[1]===sub0 || msg[1]===subP || msg[1]===sub7 || msg[1]===subD1 || msg[1]===subD2 || joinSubs.has(msg[1]))) onEvent(msg[2], rec);
+    if(msg[0]==="EVENT" && (msg[1]===sub42 || msg[1]===sub0 || msg[1]===subP || msg[1]===sub7 || msg[1]===subD1 || msg[1]===subD2 || msg[1]===subD3 || joinSubs.has(msg[1]))) onEvent(msg[2], rec);
     if(msg[0]==="EOSE" && joinSubs.has(msg[1])){
       joinSubs.delete(msg[1]);
       try{ rec.ws.send(JSON.stringify(["CLOSE", msg[1]])); }catch(e){}
@@ -1282,6 +1285,21 @@ function onEvent(ev, rec){
           reactEvIds.delete(t[1]);
           myReacts.forEach((rid, k)=>{ if(rid === t[1]) myReacts.delete(k); });
           delReaction(r.msgId, r.emoji, r.pubkey);
+        }
+      }
+    }
+    // someone deleted a DM — only the author can remove their own message
+    for(const t of (ev.tags || [])){
+      if(t[0] !== "e") continue;
+      for(const [peer, arr] of dmThreads){
+        const i = arr.findIndex(m=>m.ev.id === t[1]);
+        if(i >= 0 && arr[i].ev.pubkey === ev.pubkey){
+          arr.splice(i, 1);
+          saveDms(); updateDmBadge();
+          if($("dmsheet").classList.contains("open")){
+            if(curDmPeer === peer) renderDmThread(); else if(!curDmPeer) renderDmList();
+          }
+          break;
         }
       }
     }
@@ -2065,7 +2083,7 @@ function onDmEvent(ev){
   const arr = dmThreads.get(peer);
   arr.push(m); arr.sort((a,b)=>a.ts-b.ts);
   if(arr.length > 200) arr.splice(0, arr.length-200);
-  if(!authors.has(peer)){ authors.add(peer); for(const r of sockets) refreshProfileSub(r); }
+  if(!authors.has(peer)){ authors.add(peer); for(const r of sockets){ refreshProfileSub(r); refreshDmSub(r); } }
   nip04Decrypt(peer, ev.content).then(t=>{
     m.text = t;
     const sheetOpen = $("dmsheet").classList.contains("open");
@@ -2161,10 +2179,27 @@ function renderDmThread(){
   for(const m of (dmThreads.get(pk) || [])){
     const d = document.createElement("div");
     d.className = "dmbub " + m.dir;
-    d.innerHTML = renderBody(m.text) + `<div class="dmtime">${ago(m.ts)}</div>`;
+    d.innerHTML = renderBody(m.text) +
+      `<div class="dmtime"><span>${ago(m.ts)}</span><button class="dmdel" title="Delete this message">Delete</button></div>`;
+    d.querySelector(".dmdel").onclick = ()=>deleteDm(pk, m.ev.id);
     box.appendChild(d);
   }
   box.scrollTop = box.scrollHeight;
+}
+async function deleteDm(peer, id){
+  const arr = dmThreads.get(peer); if(!arr) return;
+  const i = arr.findIndex(m=>m.ev.id === id); if(i < 0) return;
+  if(!confirm("Delete this message?")) return;
+  const m = arr[i];
+  arr.splice(i, 1);
+  if(m.dir === "out"){
+    // best-effort NIP-09: ask relays (and clients that honor deletions) to drop it
+    try{ broadcast(await makeEvent(DELETE_KIND, [["e", id]], "")); }catch(e){}
+  }
+  saveDms(); updateDmBadge();
+  if($("dmsheet").classList.contains("open")){
+    if(curDmPeer === peer) renderDmThread(); else if(!curDmPeer) renderDmList();
+  }
 }
 function refreshDmSub(rec){
   if(rec.ws.readyState !== 1) return;
@@ -2172,6 +2207,9 @@ function refreshDmSub(rec){
   try{ rec.ws.send(JSON.stringify(["CLOSE", rec.subD2])); }catch(e){}
   rec.ws.send(JSON.stringify(["REQ", rec.subD1, {kinds:[DM_KIND], "#p":[myPubHex], limit:100}]));
   rec.ws.send(JSON.stringify(["REQ", rec.subD2, {kinds:[DM_KIND], authors:[myPubHex], limit:100}]));
+  try{ rec.ws.send(JSON.stringify(["CLOSE", rec.subD3])); }catch(e){}
+  const dmPeers = [...dmThreads.keys()];
+  if(dmPeers.length) rec.ws.send(JSON.stringify(["REQ", rec.subD3, {kinds:[DELETE_KIND], authors:dmPeers, limit:200}]));
 }
 $("dms").onclick = openDmSheet;
 $("dmclose").onclick = closeDmSheet;
