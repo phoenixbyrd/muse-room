@@ -71,7 +71,9 @@
   .urow, .rrow{display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px solid var(--line); cursor:pointer;}
   .urow:active, .rrow:active{background:var(--bg);}
   .urow .uname, .rrow .rname{font-size:15px; font-weight:600;}
+  .urow .uname{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;}
   .urow .umeta{font-size:12px; color:var(--dim); margin-left:auto; flex-shrink:0;}
+  .uacts{margin-left:auto; display:flex; gap:10px; flex-shrink:0;}
   .usec{font-size:12px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); padding:12px 4px 2px;}
   .livedot{display:inline-block; width:8px; height:8px; border-radius:50%; background:#3fb950; margin-right:6px;}
   .youflag{font-size:11px; color:var(--acc); border:1px solid var(--acc); border-radius:6px; padding:1px 6px; flex-shrink:0;}
@@ -1434,8 +1436,8 @@ function userRow(pk){
     avatarFor(pk) +
     `<span class="uname">${esc(displayName(pk))}</span>`+
     (pk === myPubHex ? `<span class="youflag">you</span>` : ``)+
-    (pk === myPubHex ? `` : `<button class="dmstart" data-dm="${pk}" title="Direct message">💬</button>`)+
-    (pk === myPubHex ? `` : `<button class="dmstart" data-mute="${pk}" title="${isUserMuted(pk) ? "Unmute" : "Mute"}">${isUserMuted(pk) ? "🔊" : "🔇"}</button>`);
+    (pk === myPubHex ? `` : `<span class="uacts"><button class="dmstart" data-dm="${pk}" title="Direct message">💬</button>`)+
+    (pk === myPubHex ? `` : `<button class="dmstart" data-mute="${pk}" title="${isUserMuted(pk) ? "Unmute" : "Mute"}">${isUserMuted(pk) ? "🔊" : "🔇"}</button></span>`);
   return row;
 }
 function renderUserList(){
