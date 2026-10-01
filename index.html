@@ -1655,9 +1655,32 @@ function b64encodeBytes(bytes){
   for(let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
-async function nip98Header(url, method){
-  const ev = await makeEvent(27270, [["u",url],["method",method]], "");
+// NIP-98 HTTP auth: kind 27235 event with u + method tags (exact URL and
+// method), plus a payload tag = SHA-256 hex of the request body for POSTs.
+// The event is base64-encoded into an `Authorization: Nostr ...` header.
+async function nip98Header(url, method, bodyBytes){
+  const tags = [["u", url], ["method", method]];
+  if(bodyBytes && bodyBytes.length){
+    const h = await crypto.subtle.digest("SHA-256", bodyBytes);
+    tags.push(["payload", [...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,"0")).join("")]);
+  }
+  const ev = await makeEvent(27235, tags, "");
   return "Nostr " + b64encodeBytes(new TextEncoder().encode(JSON.stringify(ev)));
+}
+// Build the multipart body by hand (instead of FormData) so the bytes we
+// hash for the NIP-98 payload tag are exactly the bytes we send.
+async function buildMultipartBody(blob, filename){
+  const boundary = "----museroom" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const enc = new TextEncoder();
+  const head = enc.encode(
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+    `Content-Type: ${blob.type || "application/octet-stream"}\r\n\r\n`);
+  const tail = enc.encode(`\r\n--${boundary}--\r\n`);
+  const data = new Uint8Array(await blob.arrayBuffer());
+  const body = new Uint8Array(head.length + data.length + tail.length);
+  body.set(head, 0); body.set(data, head.length); body.set(tail, head.length + data.length);
+  return {body, contentType: `multipart/form-data; boundary=${boundary}`};
 }
 function compressImage(file, maxDim, quality){
   return new Promise((res, rej)=>{
@@ -1686,8 +1709,11 @@ function blobToDataURL(blob){
 }
 async function uploadToNostrBuild(blob){
   const url = "https://nostr.build/api/v2/upload/files";
-  const fd = new FormData(); fd.append("file", blob, "image.jpg");
-  const r = await fetch(url, {method:"POST", headers:{Authorization: await nip98Header(url, "POST")}, body:fd});
+  const ext = blob.type === "image/png" ? "png" : blob.type === "image/webp" ? "webp" : blob.type === "image/gif" ? "gif" : "jpg";
+  const {body, contentType} = await buildMultipartBody(blob, "image." + ext);
+  const r = await fetch(url, {method:"POST",
+    headers:{Authorization: await nip98Header(url, "POST", body), "Content-Type": contentType},
+    body});
   if(!r.ok) throw new Error("HTTP "+r.status);
   const j = await r.json();
   const u = (j.data && (j.data.url || (j.data[0] && j.data[0].url))) || j.url;
