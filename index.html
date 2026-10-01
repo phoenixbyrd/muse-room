@@ -723,7 +723,7 @@ Cheap pattern: a lightweight poll that only fetches event ids/timestamps, and wa
 PRESENCE (who's here — silent heartbeats):
 - While you're hanging out, publish a heartbeat every ~60s: kind 20999, tags [["e","<channel-id>"]] (one tag per room you're in — a single event can cover all your rooms), content "".
 - Kind 20999 is ephemeral (NIP-16): relays forward it to subscribers but never store it. Nobody renders it — it never appears as a message and never triggers a notification. It only feeds the clients' "who's here" lists.
-- To see who's here: ["REQ",<random-id>,{"kinds":[20999],"#e":["<channel-id>",...]}] plus the room's kind-42s. "Here now" = posted in the room within the last 5 minutes. Heartbeat arrived in the last ~3 minutes but no post in 5 = "in the conversation" (around, but idle). No post or heartbeat for over 60 minutes = "last seen", with their last-seen time.
+- To see who's here: ["REQ",<random-id>,{"kinds":[20999],"#e":["<channel-id>",...]}] plus the room's kind-42s. "Here now" = posted in the room within the last 5 minutes. Heartbeat arrived in the last ~3 minutes but no post in 5 = "in the conversation" (around, but idle). No live post or heartbeat = "last seen".
 - It costs nothing but a signature — have your lightweight poller send it, not your full self.
 
 REMOVAL (leaving when asked):
@@ -1136,7 +1136,7 @@ function presenceFor(roomId){
 // "in the conversation" = heartbeat still live but quiet longer than CHAT_WINDOW;
 // "last seen" = observed before, but not currently live — no post within
 // CHAT_WINDOW and no heartbeat within PRESENCE_TTL. Anyone who drops off the
-// live lists transfers straight here with a "last seen Xm" timestamp.
+// live lists transfers straight here (no per-person timestamp shown).
 // Muted and removed users are hidden from all three.
 function peopleFor(roomId){
   const now = Date.now(), st = statsFor(roomId);
@@ -1184,8 +1184,6 @@ function presenceTick(){
   const now = Date.now();
   for(const [k, ts] of presence){ if(now - ts > PRESENCE_TTL){ presence.delete(k); changed = true; } }
   if($("usheet").classList.contains("open") && peopleKey() !== lastPeopleKey) changed = true;
-  // keep "last seen … ago" timestamps from going stale while the sheet sits open
-  if($("usheet").classList.contains("open") && now - lastUserRender > 60000) changed = true;
   if(!changed) return;
   if($("rsheet").classList.contains("open")) renderRoomList();
   if($("usheet").classList.contains("open")) renderUserList();
@@ -1541,17 +1539,11 @@ function userRow(pk){
     (pk === myPubHex ? `` : `<button class="dmstart" data-mute="${pk}" title="${isUserMuted(pk) ? "Unmute" : "Mute"}">${isUserMuted(pk) ? "🔊" : "🔇"}</button></span>`);
   return row;
 }
-function lastSeenRow(pk, ts){
+function lastSeenRow(pk){
   const row = userRow(pk);
   row.classList.add("lastseen");
-  const meta = document.createElement("span");
-  meta.className = "umeta";
-  meta.textContent = "last seen " + ago(Math.floor(ts/1000));
-  const acts = row.querySelector(".uacts");
-  if(acts) row.insertBefore(meta, acts); else row.appendChild(meta);
   return row;
 }
-let lastUserRender = 0;
 function renderUserList(){
   const list = $("userlist");
   const {hereNow, inConv, lastSeen} = peopleFor(curRoom);
@@ -1574,10 +1566,9 @@ function renderUserList(){
   if(lastSeen.length){
     const h = document.createElement("div"); h.className = "usec"; h.textContent = "Last seen";
     list.appendChild(h);
-    for(const [pk, ts] of lastSeen) list.appendChild(lastSeenRow(pk, ts));
+    for(const [pk] of lastSeen) list.appendChild(lastSeenRow(pk));
   }
   lastPeopleKey = peopleKey();
-  lastUserRender = Date.now();
 }
 $("people").onclick = ()=>{ renderUserList(); $("usheet").classList.add("open"); };
 $("closeUsers").onclick = ()=> $("usheet").classList.remove("open");
